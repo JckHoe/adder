@@ -66,7 +66,7 @@ Adder reads YAML into Go structs and overlays env vars. It does **case-insensiti
 
    If you can rename the env var to match the auto pattern, do that instead and drop the `BindEnv`.
 
-6. **Address slice elements by index in env vars.** A slice field's keyPath gains the element index: `Clients []ClientConfig` → `clients.0.token` → `CLIENTS_0_TOKEN`. An index past the end of the list in `application.yml` appends a new element, so a list can come entirely from env. Appending stops at the first missing index, and an unindexed key (`CLIENTS=...`) is ignored.
+6. **Address slice elements by index in env vars.** A slice field's keyPath gains the element index: `Clients []ClientConfig` → `clients.0.token` → `CLIENTS_0_TOKEN`. An index past the end of the list in `application.yml` appends a new element, so a list can come entirely from env. Appending stops at the first missing index, and an unindexed key (`CLIENTS=...`) is ignored. An unindexed key for a field inside an element (`CLIENTS_TOKEN=...`) still applies to every element, with the indexed key winning where both are set.
 
    ```
    CLIENTS_1_TOKEN=t9      → clients[1].token    (override)

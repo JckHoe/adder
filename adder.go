@@ -274,6 +274,20 @@ func (a *Adder) unmarshalWithPath(data map[string]any, v any, prefix string) err
 }
 
 func (a *Adder) getEnvValue(key string) string {
+	if v := a.lookupEnvValue(key); v != "" {
+		return v
+	}
+
+	// Keys nested under a slice index also honour the unindexed form, so
+	// CLIENTS_TOKEN still applies to every element of clients.
+	if unindexed := stripIndexes(key); unindexed != key {
+		return a.lookupEnvValue(unindexed)
+	}
+
+	return ""
+}
+
+func (a *Adder) lookupEnvValue(key string) string {
 	lowerKey := strings.ToLower(key)
 
 	// Check explicit bindings first
@@ -291,6 +305,29 @@ func (a *Adder) getEnvValue(key string) string {
 	}
 
 	return ""
+}
+
+// stripIndexes removes slice index segments from key. An index-terminated key
+// is left alone: modes.0 must not fall back to modes.
+func stripIndexes(key string) string {
+	parts := strings.Split(key, ".")
+	if isIndex(parts[len(parts)-1]) {
+		return key
+	}
+
+	kept := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if isIndex(part) {
+			continue
+		}
+		kept = append(kept, part)
+	}
+	return strings.Join(kept, ".")
+}
+
+func isIndex(part string) bool {
+	_, err := strconv.Atoi(part)
+	return err == nil
 }
 
 func (a *Adder) setFieldValue(field reflect.Value, value any, keyPath string) error {
@@ -455,22 +492,30 @@ func caseInsensitiveLookup(m map[string]any, key string) (any, bool) {
 // Elements not present in the config file are appended when env vars define
 // them, so a list can be supplied entirely by the environment.
 func (a *Adder) setSliceField(field reflect.Value, value any, keyPath string) error {
-	items, _ := value.([]any)
+	items, fromConfig := value.([]any)
 	elemType := field.Type().Elem()
 
 	length := len(items)
+	// Without a config value the existing field holds caller-supplied
+	// defaults; env overrides must not truncate them.
+	if !fromConfig && field.Len() > length {
+		length = field.Len()
+	}
 	for a.hasEnvForIndex(keyPath, length, elemType) {
 		length++
 	}
 
 	if length == 0 {
-		if items != nil {
+		if fromConfig {
 			field.Set(reflect.MakeSlice(field.Type(), 0, 0))
 		}
 		return nil
 	}
 
 	newSlice := reflect.MakeSlice(field.Type(), length, length)
+	if !fromConfig {
+		reflect.Copy(newSlice, field)
+	}
 	for i := 0; i < length; i++ {
 		var item any
 		if i < len(items) {

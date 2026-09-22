@@ -972,7 +972,6 @@ func TestSliceUnindexedEnvDoesNotClearSlice(t *testing.T) {
 	a := newSliceEnvAdder(t, sliceEnvYAML)
 
 	t.Setenv("CLIENTS", "whatever")
-	t.Setenv("CLIENTS_TOKEN", "should-not-apply")
 	t.Setenv("MODES", "9")
 
 	var cfg sliceEnvConfig
@@ -982,6 +981,52 @@ func TestSliceUnindexedEnvDoesNotClearSlice(t *testing.T) {
 	require.Len(t, cfg.Clients, 2)
 	assert.Equal(t, "t1", cfg.Clients[0].Token)
 	assert.Equal(t, "t2", cfg.Clients[1].Token)
+}
+
+func TestSliceUnindexedEnvAppliesToEveryElement(t *testing.T) {
+	a := newSliceEnvAdder(t, sliceEnvYAML)
+
+	t.Setenv("CLIENTS_TOKEN", "from-env")
+
+	var cfg sliceEnvConfig
+	require.NoError(t, a.Unmarshal(&cfg))
+
+	require.Len(t, cfg.Clients, 2)
+	assert.Equal(t, "from-env", cfg.Clients[0].Token)
+	assert.Equal(t, "from-env", cfg.Clients[1].Token)
+}
+
+func TestSliceIndexedEnvBeatsUnindexed(t *testing.T) {
+	a := newSliceEnvAdder(t, sliceEnvYAML)
+
+	t.Setenv("CLIENTS_TOKEN", "from-env")
+	t.Setenv("CLIENTS_1_TOKEN", "only-second")
+
+	var cfg sliceEnvConfig
+	require.NoError(t, a.Unmarshal(&cfg))
+
+	require.Len(t, cfg.Clients, 2)
+	assert.Equal(t, "from-env", cfg.Clients[0].Token)
+	assert.Equal(t, "only-second", cfg.Clients[1].Token)
+}
+
+func TestSliceDefaultsSurviveIndexedEnv(t *testing.T) {
+	a := newSliceEnvAdder(t, "name: Steve\n")
+
+	t.Setenv("CLIENTS_0_NAME", "override")
+
+	cfg := sliceEnvConfig{
+		Clients: []sliceEnvClient{
+			{Name: "d1", Token: "k1"},
+			{Name: "d2", Token: "k2"},
+		},
+	}
+	require.NoError(t, a.Unmarshal(&cfg))
+
+	require.Len(t, cfg.Clients, 2)
+	assert.Equal(t, "override", cfg.Clients[0].Name)
+	assert.Equal(t, "k1", cfg.Clients[0].Token)
+	assert.Equal(t, "d2", cfg.Clients[1].Name)
 }
 
 func TestSliceIndexedBindEnv(t *testing.T) {

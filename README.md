@@ -103,6 +103,9 @@ Notes:
 - Appending stops at the first missing index: with `CLIENTS_0_NAME` and `CLIENTS_2_NAME`
   set, only `clients[0]` is added.
 - An unindexed env var for a slice key (`CLIENTS=...`) is ignored; only indexed keys apply.
+- An unindexed env var for a field *inside* a slice element (`CLIENTS_TOKEN=...`) applies
+  to every element; an indexed key wins over it for that element. Unindexed keys never
+  append elements.
 - See [`example/env-slice`](example/env-slice/).
 
 ## Mask Sensitive Fields
