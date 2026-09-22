@@ -568,19 +568,17 @@ func (a *Adder) setSliceField(field reflect.Value, value any, keyPath configKey)
 // count, so a misspelled or unrelated variable cannot append an element that
 // nothing will ever fill.
 func (a *Adder) hasEnvForIndex(keyPath configKey, index int, elemType reflect.Type) bool {
-	return a.hasEnvForType(keyPath.probeIndex(index), elemType, nil)
+	return a.hasEnvForType(keyPath.probeIndex(index), elemType, 0)
 }
 
-func (a *Adder) hasEnvForType(key configKey, t reflect.Type, seen []reflect.Type) bool {
+// maxProbeSliceDepth bounds how far the probe descends into nested slices. A
+// slice is the only way an element type can reach itself, so this is what keeps
+// a recursive type such as Node{Children []Node} from walking forever.
+const maxProbeSliceDepth = 8
+
+func (a *Adder) hasEnvForType(key configKey, t reflect.Type, sliceDepth int) bool {
 	switch t.Kind() {
 	case reflect.Struct:
-		for _, visited := range seen {
-			if visited == t {
-				return false
-			}
-		}
-		seen = append(seen, t)
-
 		for i := 0; i < t.NumField(); i++ {
 			field := t.Field(i)
 			if field.PkgPath != "" {
@@ -591,13 +589,16 @@ func (a *Adder) hasEnvForType(key configKey, t reflect.Type, seen []reflect.Type
 			if tag := field.Tag.Get("mapstructure"); tag != "" {
 				name = tag
 			}
-			if a.hasEnvForType(key.child(name), field.Type, seen) {
+			if a.hasEnvForType(key.child(name), field.Type, sliceDepth) {
 				return true
 			}
 		}
 		return false
 	case reflect.Slice:
-		return a.hasEnvForType(key.probeIndex(0), t.Elem(), seen)
+		if sliceDepth >= maxProbeSliceDepth {
+			return false
+		}
+		return a.hasEnvForType(key.probeIndex(0), t.Elem(), sliceDepth+1)
 	case reflect.Map:
 		// Env values never reach a map element, so counting one would append a
 		// nil map that no later pass fills in.

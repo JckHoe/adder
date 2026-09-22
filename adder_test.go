@@ -1178,6 +1178,21 @@ func TestRecursiveSliceElementTypeTerminates(t *testing.T) {
 	assert.Equal(t, "root", cfg.Nodes[0].Name)
 }
 
+func TestRecursiveSliceElementFoundBelowItself(t *testing.T) {
+	a := newSliceEnvAdder(t, "name: Steve\n")
+
+	t.Setenv("NODES_0_CHILDREN_0_NAME", "leaf")
+
+	var cfg struct {
+		Nodes []sliceEnvNode
+	}
+	require.NoError(t, a.Unmarshal(&cfg))
+
+	require.Len(t, cfg.Nodes, 1)
+	require.Len(t, cfg.Nodes[0].Children, 1)
+	assert.Equal(t, "leaf", cfg.Nodes[0].Children[0].Name)
+}
+
 func TestUnsettableFieldDoesNotAppendElement(t *testing.T) {
 	a := newSliceEnvAdder(t, "name: Steve\n")
 
