@@ -1078,3 +1078,59 @@ func TestSliceIndexedEnvDurationAndEmptyList(t *testing.T) {
 	assert.Equal(t, []time.Duration{time.Second, 30 * time.Second, time.Minute}, cfg.Timeouts)
 	assert.Equal(t, []string{}, cfg.Empty)
 }
+
+func TestNumericFieldNameIsNotASliceIndex(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "application.yaml"),
+		[]byte("http:\n  \"500\":\n    timeout: 1\n"), 0o644))
+
+	a := New()
+	a.SetConfigName("application")
+	a.SetConfigType("yaml")
+	a.AddConfigPath(dir)
+	a.AutomaticEnv()
+	a.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
+	require.NoError(t, a.ReadInConfig())
+
+	t.Setenv("HTTP_TIMEOUT", "99")
+
+	var cfg struct {
+		Http struct {
+			Status struct {
+				Timeout int
+			} `mapstructure:"500"`
+		}
+	}
+	require.NoError(t, a.Unmarshal(&cfg))
+
+	assert.Equal(t, 1, cfg.Http.Status.Timeout)
+}
+
+func TestUnindexedEnvReachesScalarSliceInsideElement(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "application.yaml"),
+		[]byte("clients:\n  - name: foo\n  - name: bar\n"), 0o644))
+
+	a := New()
+	a.SetConfigName("application")
+	a.SetConfigType("yaml")
+	a.AddConfigPath(dir)
+	a.AutomaticEnv()
+	a.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
+	require.NoError(t, a.ReadInConfig())
+
+	t.Setenv("CLIENTS_TAGS_0", "shared")
+	t.Setenv("CLIENTS_1_TAGS_0", "second-only")
+
+	var cfg struct {
+		Clients []struct {
+			Name string
+			Tags []string
+		}
+	}
+	require.NoError(t, a.Unmarshal(&cfg))
+
+	require.Len(t, cfg.Clients, 2)
+	assert.Equal(t, []string{"shared"}, cfg.Clients[0].Tags)
+	assert.Equal(t, []string{"second-only"}, cfg.Clients[1].Tags)
+}

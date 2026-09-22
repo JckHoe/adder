@@ -203,10 +203,10 @@ func Unmarshal(v any) error { return defaultAdder.Unmarshal(v) }
 // the "mapstructure" struct tag. Environment variable overrides are applied
 // during unmarshalling.
 func (a *Adder) Unmarshal(v any) error {
-	return a.unmarshalWithPath(a.configValues, v, "")
+	return a.unmarshalWithPath(a.configValues, v, configKey{})
 }
 
-func (a *Adder) unmarshalWithPath(data map[string]any, v any, prefix string) error {
+func (a *Adder) unmarshalWithPath(data map[string]any, v any, prefix configKey) error {
 	rv := reflect.ValueOf(v)
 	if rv.Kind() != reflect.Ptr || rv.IsNil() {
 		return fmt.Errorf("unmarshal target must be a non-nil pointer")
@@ -232,16 +232,13 @@ func (a *Adder) unmarshalWithPath(data map[string]any, v any, prefix string) err
 			fieldName = tag
 		}
 
-		fullKey := fieldName
-		if prefix != "" {
-			fullKey = prefix + "." + fieldName
-		}
+		fullKey := prefix.child(fieldName)
 
 		// Check for env override. Slices are skipped here: their env overrides are
 		// indexed per element (e.g. CLIENTS_0_NAME) and resolved in setSliceField.
 		if fieldValue.Kind() != reflect.Slice {
 			if envVal := a.getEnvValue(fullKey); envVal != "" {
-				if err := setFieldFromString(fieldValue, envVal, fullKey); err != nil {
+				if err := setFieldFromString(fieldValue, envVal, fullKey.path); err != nil {
 					return err
 				}
 				continue
@@ -273,15 +270,15 @@ func (a *Adder) unmarshalWithPath(data map[string]any, v any, prefix string) err
 	return nil
 }
 
-func (a *Adder) getEnvValue(key string) string {
-	if v := a.lookupEnvValue(key); v != "" {
+func (a *Adder) getEnvValue(key configKey) string {
+	if v := a.lookupEnvValue(key.path); v != "" {
 		return v
 	}
 
 	// Keys nested under a slice index also honour the unindexed form, so
 	// CLIENTS_TOKEN still applies to every element of clients.
-	if unindexed := stripIndexes(key); unindexed != key {
-		return a.lookupEnvValue(unindexed)
+	if fb := key.fallback(); fb != key.path {
+		return a.lookupEnvValue(fb)
 	}
 
 	return ""
@@ -307,30 +304,42 @@ func (a *Adder) lookupEnvValue(key string) string {
 	return ""
 }
 
-// stripIndexes removes slice index segments from key. An index-terminated key
-// is left alone: modes.0 must not fall back to modes.
-func stripIndexes(key string) string {
-	parts := strings.Split(key, ".")
-	if isIndex(parts[len(parts)-1]) {
-		return key
-	}
-
-	kept := make([]string, 0, len(parts))
-	for _, part := range parts {
-		if isIndex(part) {
-			continue
-		}
-		kept = append(kept, part)
-	}
-	return strings.Join(kept, ".")
+// configKey is a config path that remembers which of its segments are slice
+// indexes, so the unindexed env fallback never has to guess: a field named
+// "500" stays a field, while the 500 in clients.500.token stays an index.
+type configKey struct {
+	path     string
+	stripped string
+	lastIdx  string
 }
 
-func isIndex(part string) bool {
-	_, err := strconv.Atoi(part)
-	return err == nil
+func (k configKey) child(name string) configKey {
+	return configKey{path: joinKey(k.path, name), stripped: joinKey(k.stripped, name)}
 }
 
-func (a *Adder) setFieldValue(field reflect.Value, value any, keyPath string) error {
+func (k configKey) index(i int) configKey {
+	idx := strconv.Itoa(i)
+	return configKey{path: joinKey(k.path, idx), stripped: k.stripped, lastIdx: idx}
+}
+
+// fallback is the key with every index dropped except a trailing one, so
+// clients.0.token also answers to CLIENTS_TOKEN and clients.0.tags.0 to
+// CLIENTS_TAGS_0, while modes.0 never answers to MODES.
+func (k configKey) fallback() string {
+	if k.lastIdx == "" {
+		return k.stripped
+	}
+	return joinKey(k.stripped, k.lastIdx)
+}
+
+func joinKey(prefix, name string) string {
+	if prefix == "" {
+		return name
+	}
+	return prefix + "." + name
+}
+
+func (a *Adder) setFieldValue(field reflect.Value, value any, keyPath configKey) error {
 	// Slices and structs are handled even when absent from the config file, so
 	// that indexed env overrides can still populate them.
 	switch field.Kind() {
@@ -355,7 +364,7 @@ func (a *Adder) setFieldValue(field reflect.Value, value any, keyPath string) er
 		}
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
 		if field.Type() == durationType {
-			return setDurationField(field, value, keyPath)
+			return setDurationField(field, value, keyPath.path)
 		}
 		switch v := value.(type) {
 		case int:
@@ -406,7 +415,7 @@ func (a *Adder) setFieldValue(field reflect.Value, value any, keyPath string) er
 		}
 		mapType := field.Type()
 		if mapType.Key().Kind() != reflect.String || mapType.Elem().Kind() != reflect.String {
-			return fmt.Errorf("unsupported map type %s at %s: only map[string]string is supported", mapType, keyPath)
+			return fmt.Errorf("unsupported map type %s at %s: only map[string]string is supported", mapType, keyPath.path)
 		}
 		newMap := reflect.MakeMap(mapType)
 		for k, v := range m {
@@ -491,7 +500,7 @@ func caseInsensitiveLookup(m map[string]any, key string) (any, bool) {
 // environment variable overrides (e.g. CLIENTS_0_NAME for clients[0].name).
 // Elements not present in the config file are appended when env vars define
 // them, so a list can be supplied entirely by the environment.
-func (a *Adder) setSliceField(field reflect.Value, value any, keyPath string) error {
+func (a *Adder) setSliceField(field reflect.Value, value any, keyPath configKey) error {
 	items, fromConfig := value.([]any)
 	elemType := field.Type().Elem()
 
@@ -523,7 +532,7 @@ func (a *Adder) setSliceField(field reflect.Value, value any, keyPath string) er
 		}
 
 		elem := newSlice.Index(i)
-		elemKey := keyPath + "." + strconv.Itoa(i)
+		elemKey := keyPath.index(i)
 
 		switch elem.Kind() {
 		case reflect.Struct, reflect.Slice, reflect.Map:
@@ -532,7 +541,7 @@ func (a *Adder) setSliceField(field reflect.Value, value any, keyPath string) er
 			}
 		default:
 			if envVal := a.getEnvValue(elemKey); envVal != "" {
-				if err := setFieldFromString(elem, envVal, elemKey); err != nil {
+				if err := setFieldFromString(elem, envVal, elemKey.path); err != nil {
 					return err
 				}
 				continue
@@ -550,12 +559,12 @@ func (a *Adder) setSliceField(field reflect.Value, value any, keyPath string) er
 // hasEnvForIndex reports whether the environment defines the slice element at
 // index for keyPath. Scalar elements need the exact key (MODES_2); composite
 // elements need any key below it (CLIENTS_2_NAME).
-func (a *Adder) hasEnvForIndex(keyPath string, index int, elemType reflect.Type) bool {
-	key := keyPath + "." + strconv.Itoa(index)
+func (a *Adder) hasEnvForIndex(keyPath configKey, index int, elemType reflect.Type) bool {
+	key := keyPath.index(index)
 
 	switch elemType.Kind() {
 	case reflect.Struct, reflect.Slice, reflect.Map:
-		return a.hasEnvBelow(key)
+		return a.hasEnvBelow(key.path)
 	default:
 		return a.getEnvValue(key) != ""
 	}
