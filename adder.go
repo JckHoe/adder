@@ -322,6 +322,13 @@ func (k configKey) index(i int) configKey {
 	return configKey{path: joinKey(k.path, idx), stripped: k.stripped, lastIdx: idx}
 }
 
+// probeIndex is index for existence checks. It keeps the index in the stripped
+// form too, so asking whether element i exists can never be answered by an
+// unindexed variable - CLIENTS_TOKEN must not append clients forever.
+func (k configKey) probeIndex(i int) configKey {
+	return k.child(strconv.Itoa(i))
+}
+
 // fallback is the key with every index dropped except a trailing one, so
 // clients.0.token also answers to CLIENTS_TOKEN and clients.0.tags.0 to
 // CLIENTS_TAGS_0, while modes.0 never answers to MODES.
@@ -557,43 +564,49 @@ func (a *Adder) setSliceField(field reflect.Value, value any, keyPath configKey)
 }
 
 // hasEnvForIndex reports whether the environment defines the slice element at
-// index for keyPath. Scalar elements need the exact key (MODES_2); composite
-// elements need any key below it (CLIENTS_2_NAME).
+// index for keyPath. Only keys that resolve to a settable field of elemType
+// count, so a misspelled or unrelated variable cannot append an element that
+// nothing will ever fill.
 func (a *Adder) hasEnvForIndex(keyPath configKey, index int, elemType reflect.Type) bool {
-	key := keyPath.index(index)
-
-	switch elemType.Kind() {
-	case reflect.Struct, reflect.Slice, reflect.Map:
-		return a.hasEnvBelow(key.path)
-	default:
-		return a.getEnvValue(key) != ""
-	}
+	return a.hasEnvForType(keyPath.probeIndex(index), elemType, nil)
 }
 
-func (a *Adder) hasEnvBelow(key string) bool {
-	prefix := strings.ToLower(key) + "."
-	for boundKey, envVar := range a.envBindings {
-		if strings.HasPrefix(boundKey, prefix) && os.Getenv(envVar) != "" {
-			return true
+func (a *Adder) hasEnvForType(key configKey, t reflect.Type, seen []reflect.Type) bool {
+	switch t.Kind() {
+	case reflect.Struct:
+		for _, visited := range seen {
+			if visited == t {
+				return false
+			}
 		}
-	}
+		seen = append(seen, t)
 
-	if !a.autoEnv {
+		for i := 0; i < t.NumField(); i++ {
+			field := t.Field(i)
+			if field.PkgPath != "" {
+				continue
+			}
+
+			name := strings.ToLower(field.Name)
+			if tag := field.Tag.Get("mapstructure"); tag != "" {
+				name = tag
+			}
+			if a.hasEnvForType(key.child(name), field.Type, seen) {
+				return true
+			}
+		}
 		return false
+	case reflect.Slice:
+		return a.hasEnvForType(key.probeIndex(0), t.Elem(), seen)
+	case reflect.Map:
+		// Env values never reach a map element, so counting one would append a
+		// nil map that no later pass fills in.
+		return false
+	default:
+		// Indexes of enclosing slices are still strippable here, so
+		// CLIENTS_TAGS_0 reaches the tags list of every client.
+		return a.getEnvValue(key) != ""
 	}
-
-	envPrefix := strings.ToUpper(key) + "."
-	if a.envReplacer != nil {
-		envPrefix = a.envReplacer.Replace(envPrefix)
-	}
-	for _, entry := range os.Environ() {
-		name, value, _ := strings.Cut(entry, "=")
-		if value != "" && strings.HasPrefix(name, envPrefix) {
-			return true
-		}
-	}
-
-	return false
 }
 
 func configExtensions(configType string) []string {

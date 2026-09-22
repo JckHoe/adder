@@ -1134,3 +1134,46 @@ func TestUnindexedEnvReachesScalarSliceInsideElement(t *testing.T) {
 	assert.Equal(t, []string{"shared"}, cfg.Clients[0].Tags)
 	assert.Equal(t, []string{"second-only"}, cfg.Clients[1].Tags)
 }
+
+func TestUnknownIndexedEnvDoesNotAppendElement(t *testing.T) {
+	a := newSliceEnvAdder(t, sliceEnvYAML)
+
+	t.Setenv("CLIENTS_2_TOKNE", "typo")
+
+	var cfg sliceEnvConfig
+	require.NoError(t, a.Unmarshal(&cfg))
+
+	require.Len(t, cfg.Clients, 2)
+}
+
+func TestMapElementIsNotAppendedFromEnv(t *testing.T) {
+	a := newSliceEnvAdder(t, "name: Steve\n")
+
+	t.Setenv("TAGS_0_FOO", "bar")
+
+	var cfg struct {
+		Tags []map[string]string
+	}
+	require.NoError(t, a.Unmarshal(&cfg))
+
+	assert.Empty(t, cfg.Tags)
+}
+
+type sliceEnvNode struct {
+	Name     string
+	Children []sliceEnvNode
+}
+
+func TestRecursiveSliceElementTypeTerminates(t *testing.T) {
+	a := newSliceEnvAdder(t, "name: Steve\n")
+
+	t.Setenv("NODES_0_NAME", "root")
+
+	var cfg struct {
+		Nodes []sliceEnvNode
+	}
+	require.NoError(t, a.Unmarshal(&cfg))
+
+	require.Len(t, cfg.Nodes, 1)
+	assert.Equal(t, "root", cfg.Nodes[0].Name)
+}
