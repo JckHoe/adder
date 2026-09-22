@@ -603,10 +603,27 @@ func (a *Adder) hasEnvForType(key configKey, t reflect.Type, seen []reflect.Type
 		// nil map that no later pass fills in.
 		return false
 	default:
+		if !settableFromString(t) {
+			return false
+		}
 		// Indexes of enclosing slices are still strippable here, so
 		// CLIENTS_TAGS_0 reaches the tags list of every client.
 		return a.getEnvValue(key) != ""
 	}
+}
+
+// settableFromString reports the kinds setFieldFromString can actually fill.
+// The two must stay in step: counting a kind the setter ignores appends an
+// element that stays zero forever.
+func settableFromString(t reflect.Type) bool {
+	switch t.Kind() {
+	case reflect.String, reflect.Bool,
+		reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64,
+		reflect.Float32, reflect.Float64:
+		return true
+	}
+	return false
 }
 
 func configExtensions(configType string) []string {

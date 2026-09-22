@@ -1177,3 +1177,22 @@ func TestRecursiveSliceElementTypeTerminates(t *testing.T) {
 	require.Len(t, cfg.Nodes, 1)
 	assert.Equal(t, "root", cfg.Nodes[0].Name)
 }
+
+func TestUnsettableFieldDoesNotAppendElement(t *testing.T) {
+	a := newSliceEnvAdder(t, "name: Steve\n")
+
+	t.Setenv("CLIENTS_0_EXTRA", "oops")
+	t.Setenv("ITEMS_0", "foo")
+
+	var cfg struct {
+		Clients []struct {
+			Name  string
+			Extra *string
+		}
+		Items []any
+	}
+	require.NoError(t, a.Unmarshal(&cfg))
+
+	assert.Empty(t, cfg.Clients)
+	assert.Empty(t, cfg.Items)
+}
