@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -49,7 +48,10 @@ func main() {
 	//   CLIENTS_2_NAME=baz      appends clients[2]
 	//   CLIENTS_2_AUTH_ID=id-2  sets clients[2].auth.id
 	//   PATHS_0=/one            builds paths, absent from application.yaml
-	configJSON, _ := json.MarshalIndent(config, "", "  ")
+	configJSON, err := adder.PrettyJSON(config)
+	if err != nil {
+		panic(err)
+	}
 	fmt.Println("Config loaded:")
-	fmt.Println(string(configJSON))
+	fmt.Println(configJSON)
 }
