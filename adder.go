@@ -104,6 +104,10 @@ func AutomaticEnv() { defaultAdder.AutomaticEnv() }
 // [Adder.Unmarshal] checks for an environment variable for each config key before
 // using the value from the config file. Use [Adder.SetEnvKeyReplacer] to control how
 // config keys are mapped to environment variable names.
+//
+// Slice elements are addressed by index, so CLIENTS_1_TOKEN overrides
+// clients[1].token. An index beyond the elements in the config file appends a new
+// element, so a list can be defined entirely by the environment.
 func (a *Adder) AutomaticEnv() {
 	a.autoEnv = true
 }
@@ -233,20 +237,28 @@ func (a *Adder) unmarshalWithPath(data map[string]any, v any, prefix string) err
 			fullKey = prefix + "." + fieldName
 		}
 
-		// Check for env override
-		if envVal := a.getEnvValue(fullKey); envVal != "" {
-			if err := setFieldFromString(fieldValue, envVal, fullKey); err != nil {
-				return err
+		// Check for env override. Slices are skipped here: their env overrides are
+		// indexed per element (e.g. CLIENTS_0_NAME) and resolved in setSliceField.
+		if fieldValue.Kind() != reflect.Slice {
+			if envVal := a.getEnvValue(fullKey); envVal != "" {
+				if err := setFieldFromString(fieldValue, envVal, fullKey); err != nil {
+					return err
+				}
+				continue
 			}
-			continue
 		}
 
 		// Get value from config (case-insensitive lookup)
 		configVal, exists := caseInsensitiveLookup(data, fieldName)
 		if !exists {
-			// Still recurse into struct fields to check env bindings
-			if fieldValue.Kind() == reflect.Struct {
+			// Still recurse into struct and slice fields to check env bindings
+			switch fieldValue.Kind() {
+			case reflect.Struct:
 				if err := a.unmarshalWithPath(map[string]any{}, fieldValue.Addr().Interface(), fullKey); err != nil {
+					return err
+				}
+			case reflect.Slice:
+				if err := a.setSliceField(fieldValue, nil, fullKey); err != nil {
 					return err
 				}
 			}
@@ -282,15 +294,24 @@ func (a *Adder) getEnvValue(key string) string {
 }
 
 func (a *Adder) setFieldValue(field reflect.Value, value any, keyPath string) error {
+	// Slices and structs are handled even when absent from the config file, so
+	// that indexed env overrides can still populate them.
+	switch field.Kind() {
+	case reflect.Slice:
+		return a.setSliceField(field, value, keyPath)
+	case reflect.Struct:
+		m, _ := value.(map[string]any)
+		if m == nil {
+			m = map[string]any{}
+		}
+		return a.unmarshalWithPath(m, field.Addr().Interface(), keyPath)
+	}
+
 	if value == nil {
 		return nil
 	}
 
 	switch field.Kind() {
-	case reflect.Struct:
-		if m, ok := value.(map[string]any); ok {
-			return a.unmarshalWithPath(m, field.Addr().Interface(), keyPath)
-		}
 	case reflect.String:
 		if s, ok := value.(string); ok {
 			field.SetString(s)
@@ -355,8 +376,6 @@ func (a *Adder) setFieldValue(field reflect.Value, value any, keyPath string) er
 			newMap.SetMapIndex(reflect.ValueOf(k), reflect.ValueOf(fmt.Sprintf("%v", v)))
 		}
 		field.Set(newMap)
-	case reflect.Slice:
-		return a.setSliceField(field, value, keyPath)
 	}
 
 	return nil
@@ -431,53 +450,96 @@ func caseInsensitiveLookup(m map[string]any, key string) (any, bool) {
 	return nil, false
 }
 
+// setSliceField populates a slice field from the config value, applying indexed
+// environment variable overrides (e.g. CLIENTS_0_NAME for clients[0].name).
+// Elements not present in the config file are appended when env vars define
+// them, so a list can be supplied entirely by the environment.
 func (a *Adder) setSliceField(field reflect.Value, value any, keyPath string) error {
-	slice, ok := value.([]any)
-	if !ok {
+	items, _ := value.([]any)
+	elemType := field.Type().Elem()
+
+	length := len(items)
+	for a.hasEnvForIndex(keyPath, length, elemType) {
+		length++
+	}
+
+	if length == 0 {
+		if items != nil {
+			field.Set(reflect.MakeSlice(field.Type(), 0, 0))
+		}
 		return nil
 	}
 
-	elemType := field.Type().Elem()
-	newSlice := reflect.MakeSlice(field.Type(), len(slice), len(slice))
+	newSlice := reflect.MakeSlice(field.Type(), length, length)
+	for i := 0; i < length; i++ {
+		var item any
+		if i < len(items) {
+			item = items[i]
+		}
 
-	for i, item := range slice {
 		elem := newSlice.Index(i)
-		switch elemType.Kind() {
-		case reflect.String:
-			if s, ok := item.(string); ok {
-				elem.SetString(s)
+		elemKey := keyPath + "." + strconv.Itoa(i)
+
+		switch elem.Kind() {
+		case reflect.Struct, reflect.Slice, reflect.Map:
+			if err := a.setFieldValue(elem, item, elemKey); err != nil {
+				return err
 			}
-		case reflect.Int, reflect.Int64:
-			if elemType == durationType {
-				if err := setDurationField(elem, item, keyPath); err != nil {
+		default:
+			if envVal := a.getEnvValue(elemKey); envVal != "" {
+				if err := setFieldFromString(elem, envVal, elemKey); err != nil {
 					return err
 				}
 				continue
 			}
-			switch v := item.(type) {
-			case int:
-				elem.SetInt(int64(v))
-			case float64:
-				elem.SetInt(int64(v))
-			}
-		case reflect.Float32, reflect.Float64:
-			switch v := item.(type) {
-			case float64:
-				elem.SetFloat(v)
-			case int:
-				elem.SetFloat(float64(v))
-			}
-		case reflect.Struct:
-			if m, ok := item.(map[string]any); ok {
-				if err := a.unmarshalWithPath(m, elem.Addr().Interface(), keyPath); err != nil {
-					return err
-				}
+			if err := a.setFieldValue(elem, item, elemKey); err != nil {
+				return err
 			}
 		}
 	}
 
 	field.Set(newSlice)
 	return nil
+}
+
+// hasEnvForIndex reports whether the environment defines the slice element at
+// index for keyPath. Scalar elements need the exact key (MODES_2); composite
+// elements need any key below it (CLIENTS_2_NAME).
+func (a *Adder) hasEnvForIndex(keyPath string, index int, elemType reflect.Type) bool {
+	key := keyPath + "." + strconv.Itoa(index)
+
+	switch elemType.Kind() {
+	case reflect.Struct, reflect.Slice, reflect.Map:
+		return a.hasEnvBelow(key)
+	default:
+		return a.getEnvValue(key) != ""
+	}
+}
+
+func (a *Adder) hasEnvBelow(key string) bool {
+	prefix := strings.ToLower(key) + "."
+	for boundKey, envVar := range a.envBindings {
+		if strings.HasPrefix(boundKey, prefix) && os.Getenv(envVar) != "" {
+			return true
+		}
+	}
+
+	if !a.autoEnv {
+		return false
+	}
+
+	envPrefix := strings.ToUpper(key) + "."
+	if a.envReplacer != nil {
+		envPrefix = a.envReplacer.Replace(envPrefix)
+	}
+	for _, entry := range os.Environ() {
+		name, value, _ := strings.Cut(entry, "=")
+		if value != "" && strings.HasPrefix(name, envPrefix) {
+			return true
+		}
+	}
+
+	return false
 }
 
 func configExtensions(configType string) []string {
