@@ -234,9 +234,8 @@ func (a *Adder) unmarshalWithPath(data map[string]any, v any, prefix configKey) 
 
 		fullKey := prefix.child(fieldName)
 
-		// Check for env override. Slices are skipped here: their env overrides are
-		// indexed per element (e.g. CLIENTS_0_NAME) and resolved in setSliceField.
-		if fieldValue.Kind() != reflect.Slice {
+		// Check for env override
+		if settableFromString(fieldValue.Type()) {
 			if envVal := a.getEnvValue(fullKey); envVal != "" {
 				if err := setFieldFromString(fieldValue, envVal, fullKey.path); err != nil {
 					return err
@@ -275,10 +274,10 @@ func (a *Adder) getEnvValue(key configKey) string {
 		return v
 	}
 
-	// Keys nested under a slice index also honour the unindexed form, so
-	// CLIENTS_TOKEN still applies to every element of clients.
-	if fb := key.fallback(); fb != key.path {
-		return a.lookupEnvValue(fb)
+	// A field inside a slice element also honours the unindexed form, so
+	// CLIENTS_TOKEN applies to every element of clients.
+	if !key.isIndex && key.stripped != key.path {
+		return a.lookupEnvValue(key.stripped)
 	}
 
 	return ""
@@ -304,13 +303,11 @@ func (a *Adder) lookupEnvValue(key string) string {
 	return ""
 }
 
-// configKey is a config path that remembers which of its segments are slice
-// indexes, so the unindexed env fallback never has to guess: a field named
-// "500" stays a field, while the 500 in clients.500.token stays an index.
+// configKey is a config path plus the same path with slice indexes dropped.
 type configKey struct {
 	path     string
 	stripped string
-	lastIdx  string
+	isIndex  bool
 }
 
 func (k configKey) child(name string) configKey {
@@ -318,25 +315,7 @@ func (k configKey) child(name string) configKey {
 }
 
 func (k configKey) index(i int) configKey {
-	idx := strconv.Itoa(i)
-	return configKey{path: joinKey(k.path, idx), stripped: k.stripped, lastIdx: idx}
-}
-
-// probeIndex is index for existence checks. It keeps the index in the stripped
-// form too, so asking whether element i exists can never be answered by an
-// unindexed variable - CLIENTS_TOKEN must not append clients forever.
-func (k configKey) probeIndex(i int) configKey {
-	return k.child(strconv.Itoa(i))
-}
-
-// fallback is the key with every index dropped except a trailing one, so
-// clients.0.token also answers to CLIENTS_TOKEN and clients.0.tags.0 to
-// CLIENTS_TAGS_0, while modes.0 never answers to MODES.
-func (k configKey) fallback() string {
-	if k.lastIdx == "" {
-		return k.stripped
-	}
-	return joinKey(k.stripped, k.lastIdx)
+	return configKey{path: joinKey(k.path, strconv.Itoa(i)), stripped: k.stripped, isIndex: true}
 }
 
 func joinKey(prefix, name string) string {
@@ -563,17 +542,13 @@ func (a *Adder) setSliceField(field reflect.Value, value any, keyPath configKey)
 	return nil
 }
 
-// hasEnvForIndex reports whether the environment defines the slice element at
-// index for keyPath. Only keys that resolve to a settable field of elemType
-// count, so a misspelled or unrelated variable cannot append an element that
-// nothing will ever fill.
+// hasEnvForIndex reports whether an indexed env var sets a settable field of the
+// element at index. Unindexed fallbacks never count, so they cannot append.
 func (a *Adder) hasEnvForIndex(keyPath configKey, index int, elemType reflect.Type) bool {
-	return a.hasEnvForType(keyPath.probeIndex(index), elemType, 0)
+	return a.hasEnvForType(keyPath.index(index), elemType, 0)
 }
 
-// maxProbeSliceDepth bounds how far the probe descends into nested slices. A
-// slice is the only way an element type can reach itself, so this is what keeps
-// a recursive type such as Node{Children []Node} from walking forever.
+// maxProbeSliceDepth stops recursive types like Node{Children []Node}.
 const maxProbeSliceDepth = 8
 
 func (a *Adder) hasEnvForType(key configKey, t reflect.Type, sliceDepth int) bool {
@@ -598,24 +573,13 @@ func (a *Adder) hasEnvForType(key configKey, t reflect.Type, sliceDepth int) boo
 		if sliceDepth >= maxProbeSliceDepth {
 			return false
 		}
-		return a.hasEnvForType(key.probeIndex(0), t.Elem(), sliceDepth+1)
-	case reflect.Map:
-		// Env values never reach a map element, so counting one would append a
-		// nil map that no later pass fills in.
-		return false
+		return a.hasEnvForType(key.index(0), t.Elem(), sliceDepth+1)
 	default:
-		if !settableFromString(t) {
-			return false
-		}
-		// Indexes of enclosing slices are still strippable here, so
-		// CLIENTS_TAGS_0 reaches the tags list of every client.
-		return a.getEnvValue(key) != ""
+		return settableFromString(t) && a.lookupEnvValue(key.path) != ""
 	}
 }
 
-// settableFromString reports the kinds setFieldFromString can actually fill.
-// The two must stay in step: counting a kind the setter ignores appends an
-// element that stays zero forever.
+// settableFromString must match the kinds setFieldFromString handles.
 func settableFromString(t reflect.Type) bool {
 	switch t.Kind() {
 	case reflect.String, reflect.Bool,

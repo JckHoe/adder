@@ -859,18 +859,9 @@ type sliceEnvConfig struct {
 
 func newSliceEnvAdder(t *testing.T, content string) *Adder {
 	t.Helper()
-
-	dir := t.TempDir()
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "application.yaml"), []byte(content), 0o644))
-
-	a := New()
-	a.SetConfigName("application")
-	a.SetConfigType("yaml")
-	a.AddConfigPath(dir)
+	a := newTestAdder(t, content)
 	a.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
 	a.AutomaticEnv()
-	require.NoError(t, a.ReadInConfig())
-
 	return a
 }
 
@@ -1030,16 +1021,9 @@ func TestSliceDefaultsSurviveIndexedEnv(t *testing.T) {
 }
 
 func TestSliceIndexedBindEnv(t *testing.T) {
-	dir := t.TempDir()
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "application.yaml"), []byte("name: Steve\n"), 0o644))
-
-	a := New()
-	a.SetConfigName("application")
-	a.SetConfigType("yaml")
-	a.AddConfigPath(dir)
+	a := newTestAdder(t, "name: Steve\n")
 	require.NoError(t, a.BindEnv("clients.0.token", "FIRST_CLIENT_TOKEN"))
 	require.NoError(t, a.BindEnv("paths.0", "FIRST_PATH"))
-	require.NoError(t, a.ReadInConfig())
 
 	t.Setenv("FIRST_CLIENT_TOKEN", "bound-token")
 	t.Setenv("FIRST_PATH", "/one")
@@ -1058,16 +1042,7 @@ func TestSliceIndexedEnvDurationAndEmptyList(t *testing.T) {
 		Empty    []string
 	}
 
-	dir := t.TempDir()
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "application.yaml"), []byte("timeouts:\n  - 1s\n  - 2s\nempty: []\n"), 0o644))
-
-	a := New()
-	a.SetConfigName("application")
-	a.SetConfigType("yaml")
-	a.AddConfigPath(dir)
-	a.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
-	a.AutomaticEnv()
-	require.NoError(t, a.ReadInConfig())
+	a := newSliceEnvAdder(t, "timeouts:\n  - 1s\n  - 2s\nempty: []\n")
 
 	t.Setenv("TIMEOUTS_1", "30s")
 	t.Setenv("TIMEOUTS_2", "1m")
@@ -1080,17 +1055,7 @@ func TestSliceIndexedEnvDurationAndEmptyList(t *testing.T) {
 }
 
 func TestNumericFieldNameIsNotASliceIndex(t *testing.T) {
-	dir := t.TempDir()
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "application.yaml"),
-		[]byte("http:\n  \"500\":\n    timeout: 1\n"), 0o644))
-
-	a := New()
-	a.SetConfigName("application")
-	a.SetConfigType("yaml")
-	a.AddConfigPath(dir)
-	a.AutomaticEnv()
-	a.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
-	require.NoError(t, a.ReadInConfig())
+	a := newSliceEnvAdder(t, "http:\n  \"500\":\n    timeout: 1\n")
 
 	t.Setenv("HTTP_TIMEOUT", "99")
 
@@ -1106,33 +1071,48 @@ func TestNumericFieldNameIsNotASliceIndex(t *testing.T) {
 	assert.Equal(t, 1, cfg.Http.Status.Timeout)
 }
 
-func TestUnindexedEnvReachesScalarSliceInsideElement(t *testing.T) {
-	dir := t.TempDir()
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "application.yaml"),
-		[]byte("clients:\n  - name: foo\n  - name: bar\n"), 0o644))
+func TestUnindexedEnvDoesNotAppendNestedElements(t *testing.T) {
+	a := newSliceEnvAdder(t, "clients:\n  - name: foo\n  - name: bar\n")
 
-	a := New()
-	a.SetConfigName("application")
-	a.SetConfigType("yaml")
-	a.AddConfigPath(dir)
-	a.AutomaticEnv()
-	a.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
-	require.NoError(t, a.ReadInConfig())
-
-	t.Setenv("CLIENTS_TAGS_0", "shared")
+	t.Setenv("CLIENTS_TAGS_0", "ignored")
+	t.Setenv("CLIENTS_SUBS_0_NAME", "ignored")
+	t.Setenv("CLIENTS_SUBS_NAME", "shared")
 	t.Setenv("CLIENTS_1_TAGS_0", "second-only")
+	t.Setenv("CLIENTS_1_SUBS_0_ID", "s1")
 
 	var cfg struct {
 		Clients []struct {
 			Name string
 			Tags []string
+			Subs []struct{ Name, Id string }
 		}
 	}
 	require.NoError(t, a.Unmarshal(&cfg))
 
 	require.Len(t, cfg.Clients, 2)
-	assert.Equal(t, []string{"shared"}, cfg.Clients[0].Tags)
+	assert.Empty(t, cfg.Clients[0].Tags)
+	assert.Empty(t, cfg.Clients[0].Subs)
 	assert.Equal(t, []string{"second-only"}, cfg.Clients[1].Tags)
+	require.Len(t, cfg.Clients[1].Subs, 1)
+	assert.Equal(t, "shared", cfg.Clients[1].Subs[0].Name)
+	assert.Equal(t, "s1", cfg.Clients[1].Subs[0].Id)
+}
+
+func TestEnvMatchingStructKeyKeepsConfig(t *testing.T) {
+	a := newSliceEnvAdder(t, "user:\n  name: foo\nclients:\n  - auth:\n      id: a1\n")
+
+	t.Setenv("USER", "someone")
+	t.Setenv("CLIENTS_AUTH", "x")
+
+	var cfg struct {
+		User    struct{ Name string }
+		Clients []sliceEnvClient
+	}
+	require.NoError(t, a.Unmarshal(&cfg))
+
+	assert.Equal(t, "foo", cfg.User.Name)
+	require.Len(t, cfg.Clients, 1)
+	assert.Equal(t, "a1", cfg.Clients[0].Auth.Id)
 }
 
 func TestUnknownIndexedEnvDoesNotAppendElement(t *testing.T) {
